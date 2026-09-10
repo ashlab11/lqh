@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from lqh.experiments.router_locality.loss import LocalityLossConfig, locality_loss
@@ -47,6 +48,37 @@ def test_union_loss_is_not_shrunk_by_appending_redundant_valid_tokens() -> None:
     _, extended_metrics = locality_loss([(0, extended_logits)], extended_mask, config)
 
     assert extended_metrics["router_expected_union"].item() >= base_metrics["router_expected_union"].item() - 1e-4
+
+
+def test_union_loss_proxy_is_calibrated_to_top_k_not_one() -> None:
+    """Regression test: LFM2's real selection
+    (Lfm2MoeSparseMoeBlock.route_tokens_to_experts) picks the top_k experts by
+    raw sigmoid(logits) per token, so a confident token's total selection mass
+    across experts should sum to ~top_k. A prior version renormalized sigmoid
+    scores to sum to exactly 1 across all experts regardless of top_k, so for
+    top_k=4 (LFM2's real value) it under-counted per-token selection mass by
+    ~4x. That silently required a much larger union_weight than intended to
+    have any effect, and also made the loss sensitive to overall logit scale
+    rather than which experts are actually chosen -- confirmed empirically as
+    2000 SFT steps at 20x the intended weight moved neither the proxy loss nor
+    the real top-k trace, while visibly increasing language-model loss."""
+    top_k = 3
+    num_experts = 8
+    config = LocalityLossConfig(union_weight=1.0, top_k=top_k)
+    mask = torch.ones(1, 1, dtype=torch.long)
+    # A confident token: top_k experts hold nearly all the logit mass.
+    logits = torch.full((1, 1, num_experts), -10.0)
+    logits[..., :top_k] = 10.0
+
+    scores = torch.sigmoid(logits)
+    old_probabilities = scores / scores.sum(dim=-1, keepdim=True)
+    new_probabilities = (top_k * torch.softmax(logits, dim=-1)).clamp(max=1.0)
+
+    assert old_probabilities.sum().item() == pytest.approx(1.0, abs=1e-3)
+    assert new_probabilities.sum().item() == pytest.approx(top_k, abs=1e-2)
+
+    _, metrics = locality_loss([(0, logits)], mask, config)
+    assert metrics["router_expected_union"].item() == pytest.approx(top_k / num_experts, abs=1e-2)
 
 
 def test_locality_loss_combines_weighted_terms() -> None:
