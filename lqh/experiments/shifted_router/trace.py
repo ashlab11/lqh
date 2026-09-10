@@ -198,7 +198,19 @@ def attach_shifted_router_trace(model: Any, collector: ShiftedRouterTraceCollect
                 real_selected, _ = _block.route_tokens_to_experts(output)
             early_hidden_states = _state.pop("early_hidden_states")
             with torch.no_grad():
-                shifted_logits = _block.gate(_decoder_layer.ffn_norm(early_hidden_states))
+                # Call the gate's linear op directly (not _block.gate(...)):
+                # calling the module itself would re-trigger this very
+                # forward hook re-entrantly, since it's registered on
+                # _block.gate.
+                # Flatten to [B*S, H] before the gate, matching the real
+                # path's own convention (Lfm2MoeSparseMoeBlock.forward
+                # reshapes hidden_states the same way before its self.gate
+                # call), so shifted_selected comes out [B*S, top_k] like
+                # real_selected.
+                normed_early = _decoder_layer.ffn_norm(early_hidden_states).reshape(-1, early_hidden_states.shape[-1])
+                shifted_logits = torch.nn.functional.linear(
+                    normed_early, _block.gate.weight, _block.gate.bias
+                )
                 shifted_selected, _ = _block.route_tokens_to_experts(shifted_logits)
             collector.record(
                 layer=_layer,
