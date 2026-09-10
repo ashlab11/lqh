@@ -30,6 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--prompts-json", type=Path)
+    parser.add_argument(
+        "--shifted-gate-delta",
+        type=Path,
+        help="Path to a shifted_gate_delta.pt from scripts/shifted_router_pilot.py. "
+        "If given, adds+loads the trained shifted_gate and evaluates it instead of "
+        "the zero-shot (untrained, real-gate-fed-early-input) baseline.",
+    )
     return parser.parse_args()
 
 
@@ -53,8 +60,21 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
     model.to("cuda").eval()
 
+    gate_attr = "gate"
+    if args.shifted_gate_delta:
+        from lqh.experiments.shifted_router.model import add_shifted_gates
+
+        add_shifted_gates(model)
+        delta = torch.load(args.shifted_gate_delta, map_location="cpu", weights_only=True)
+        missing, unexpected = model.load_state_dict(delta["shifted_gate_weights"], strict=False)
+        if unexpected:
+            raise ValueError(f"unexpected shifted_gate-delta keys: {unexpected}")
+        print(f"loaded shifted_gate delta from {args.shifted_gate_delta} "
+              f"({len(delta['shifted_gate_weights'])} tensors)")
+        gate_attr = "shifted_gate"
+
     collector = ShiftedRouterTraceCollector()
-    handles = attach_shifted_router_trace(model, collector)
+    handles = attach_shifted_router_trace(model, collector, gate_attr=gate_attr)
     try:
         for prompt_index, prompt in enumerate(prompts):
             encoded = tokenizer(
@@ -79,6 +99,7 @@ def main() -> None:
     payload = {
         "schema_version": 1,
         "model": args.model,
+        "shifted_gate_delta": str(args.shifted_gate_delta) if args.shifted_gate_delta else None,
         "dtype": "bfloat16",
         "device": torch.cuda.get_device_name(0),
         "prompt_count": len(prompts),

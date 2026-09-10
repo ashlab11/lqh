@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=lqh-shifted-router-trace
+#SBATCH --job-name=lqh-shifted-router-pilot
 #SBATCH --output=logs/shifted_router/%x_%j.out
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -17,7 +17,7 @@ REPO_ROOT=/home/asher.labovich@liquid.ai/lqh-projects/lqh/lqh
 source /home/asher.labovich@liquid.ai/liquid_lfm/.venv/bin/activate
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-mkdir -p logs/shifted_router experiments/shifted_router/results
-ARGS=(--output "experiments/shifted_router/results/trace_${SLURM_JOB_ID}.json")
-if [[ -n "${SHIFTED_GATE_DELTA:-}" ]]; then ARGS+=(--shifted-gate-delta "$SHIFTED_GATE_DELTA"); fi
-srun --kill-on-bad-exit=1 --cpu-bind=none python scripts/shifted_router_trace.py "${ARGS[@]}"
+mkdir -p logs/shifted_router experiments/shifted_router/pilots
+srun --kill-on-bad-exit=1 --cpu-bind=none python scripts/shifted_router_pilot.py \
+  --steps "${STEPS:-200}" --learning-rate "${LEARNING_RATE:-1e-3}" --dataset-percent "${DATASET_PERCENT:-5}" \
+  --output "experiments/shifted_router/pilots/pilot_${SLURM_JOB_ID}"

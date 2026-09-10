@@ -7,12 +7,13 @@ hidden state that normally feeds a layer's MoE block, use that layer's own
 attention/conv layer's worth of lead time to prefetch the predicted experts
 from SSD before they're actually needed.
 
-This module is purely observational and requires no training: it runs the
-*existing, untrained* router weights on both the real (post-attention) and
-"early" (pre-attention) hidden states for every MoE layer, and compares the
-two top-k selections. This measures whether the current router's own weights
-already carry enough signal one layer early to be a useful prefetch oracle --
-before investing in fine-tuning a shifted router specifically.
+This module is purely observational: it runs a router (by default the same,
+untrained gate; optionally a gate fine-tuned by distillation, see model.py
+and distill.py) on both the real (post-attention) and "early"
+(pre-attention) hidden states for every MoE layer, and compares the two
+top-k selections. The zero-shot (untrained) case measures whether the
+current router's own weights already carry enough signal one layer early to
+be a useful prefetch oracle, before investing in fine-tuning one specifically.
 """
 
 from __future__ import annotations
@@ -142,15 +143,23 @@ class ShiftedRouterTraceCollector:
         }
 
 
-def attach_shifted_router_trace(model: Any, collector: ShiftedRouterTraceCollector) -> list[Any]:
+def attach_shifted_router_trace(
+    model: Any, collector: ShiftedRouterTraceCollector, *, gate_attr: str = "gate"
+) -> list[Any]:
     """Attach non-invasive hooks comparing real vs. one-layer-early routing.
 
     For every MoE decoder layer, captures the layer's own input hidden state
     (pre-attention/conv) via a forward pre-hook on the decoder layer itself,
     then at the real router's forward hook, feeds that early hidden state
-    through the *same* (untrained) gate + ffn_norm to get a "shifted"
+    through ``getattr(block, gate_attr)`` + ffn_norm to get a "shifted"
     selection, and records real vs. shifted agreement. Returns hook handles;
     callers must remove them after the benchmark run.
+
+    ``gate_attr="gate"`` (the default) evaluates the zero-shot case: the same
+    weights used for real routing, fed the early hidden state. Pass
+    ``gate_attr="shifted_gate"`` to instead evaluate a gate trained by
+    distillation for this purpose (see model.add_shifted_gates and
+    distill.py) -- the real router is untouched either way.
     """
     handles: list[Any] = []
     for layer_name, layer in model.named_modules():
@@ -197,11 +206,12 @@ def attach_shifted_router_trace(model: Any, collector: ShiftedRouterTraceCollect
             else:
                 real_selected, _ = _block.route_tokens_to_experts(output)
             early_hidden_states = _state.pop("early_hidden_states")
+            shifted_gate_module = getattr(_block, gate_attr)
             with torch.no_grad():
-                # Call the gate's linear op directly (not _block.gate(...)):
-                # calling the module itself would re-trigger this very
-                # forward hook re-entrantly, since it's registered on
-                # _block.gate.
+                # Call the gate's linear op directly (not
+                # shifted_gate_module(...)): if gate_attr=="gate", calling the
+                # module itself would re-trigger this very forward hook
+                # re-entrantly, since it's registered on _block.gate.
                 # Flatten to [B*S, H] before the gate, matching the real
                 # path's own convention (Lfm2MoeSparseMoeBlock.forward
                 # reshapes hidden_states the same way before its self.gate
@@ -209,7 +219,7 @@ def attach_shifted_router_trace(model: Any, collector: ShiftedRouterTraceCollect
                 # real_selected.
                 normed_early = _decoder_layer.ffn_norm(early_hidden_states).reshape(-1, early_hidden_states.shape[-1])
                 shifted_logits = torch.nn.functional.linear(
-                    normed_early, _block.gate.weight, _block.gate.bias
+                    normed_early, shifted_gate_module.weight, shifted_gate_module.bias
                 )
                 shifted_selected, _ = _block.route_tokens_to_experts(shifted_logits)
             collector.record(
