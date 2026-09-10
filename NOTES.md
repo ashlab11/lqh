@@ -95,3 +95,36 @@
 - Next: run a matched router_and_experts pilot (same union/churn/balance
   weights as one of the router-only runs above) and compare locality +
   perplexity against the router-only results at the same weight.
+
+## 2026-09-10 (continued): router+experts training
+
+- Implemented `enable_router_and_expert_training` (unfreezes each MoE
+  layer's `gate.weight`, `gate_up_proj`, `down_proj`) and a
+  `--trainable {router,router_and_experts}` flag on the pilot script, per
+  the user's decision to unfreeze experts after router-only training
+  proved capacity-limited (see above).
+- Smoke test (2302342, 50 steps) succeeded: no OOM/NaN, but delta
+  checkpoints are ~15GB (experts are most of the 8B model) -- confirmed
+  disk has room (4.3TB free) but this is no longer a "compact" checkpoint.
+- Ran matched 2000-step control/treatment (2302363/2302364, same
+  union=1.0/churn=0.5/balance=0.1 weights and 20%-of-train data as the
+  best router-only run) and traced them (2302656/2302657): **treatment's
+  mean_unique_experts dropped 16.37% and jaccard churn dropped 17.78%
+  vs. baseline** -- an order of magnitude larger effect than any
+  router-only result.
+- BUT held-out Wikitext-2 test perplexity collapsed for **both** runs:
+  control (no locality loss, LM loss only) 11.11 (+56% vs. baseline's
+  7.119), treatment 16.64 (+134%). This means full-parameter fine-tuning
+  of the expert bank at lr=1e-4 on ~4400 examples (20% of Wikitext-2
+  train) is itself catastrophically destabilizing the model, independent
+  of the locality loss -- the large locality "win" is confounded by
+  general model collapse, not validated as a quality-preserving
+  specialization. Do not report the -16%/-17.78% numbers as a real result
+  without first getting the control's perplexity back near baseline.
+- Next: fix the destabilization before drawing conclusions -- likely a
+  much lower learning rate for the expert parameters specifically (full
+  FT of pretrained experts usually wants ~1e-5 or lower, not 1e-4), and/or
+  parameter-efficient tuning (LoRA on gate_up_proj/down_proj) instead of
+  full-parameter unfreezing. peft is not installed in the shared cluster
+  venv; installing it or hand-rolling a low-rank adapter is now on the
+  table.
