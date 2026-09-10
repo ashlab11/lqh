@@ -17,4 +17,4 @@ cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs/router_locality experiments/router_locality/pilots
 srun --kill-on-bad-exit=1 --cpu-bind=none python scripts/router_locality_pilot.py \
-  --steps "${STEPS:-200}" --union-weight "${UNION_WEIGHT:-0.1}" --churn-weight "${CHURN_WEIGHT:-0.05}" --balance-weight "${BALANCE_WEIGHT:-0.1}" --dataset-percent "${DATASET_PERCENT:-1}" --output "experiments/router_locality/pilots/pilot_${SLURM_JOB_ID}"
+  --steps "${STEPS:-200}" --union-weight "${UNION_WEIGHT:-0.1}" --churn-weight "${CHURN_WEIGHT:-0.05}" --balance-weight "${BALANCE_WEIGHT:-0.1}" --dataset-percent "${DATASET_PERCENT:-1}" --trainable "${TRAINABLE:-router}" --output "experiments/router_locality/pilots/pilot_${SLURM_JOB_ID}"

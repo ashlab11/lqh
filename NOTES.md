@@ -61,6 +61,37 @@
   and ::test_union_loss_does_not_nan_on_bf16_padding (masking before log1p,
   not after, is still correct defensive practice even though it wasn't the
   actual trigger here since the pilot's batch_size=1 runs have no padding).
-- Next: rerun the matched pilot (same seed/data/steps) with this third fix
-  before drawing any conclusion about whether the locality loss works; all
-  prior pilot results used a buggy loss and are not informative.
+- Reran the matched 2000-step pilot with all three fixes (2301029): trained
+  cleanly (no NaN, train_loss 3.86 vs. control's 3.64). Traced (2301087):
+  mean_unique_experts -0.11% vs. baseline -- same negligible magnitude as
+  every prior (buggy) attempt. The loss is now numerically correct but the
+  real effect is still tiny at union_weight=0.1.
+- Scaled 10x (union_weight=1.0, churn_weight=0.5) at 2000 steps, and pulled
+  from a 20%-of-train slice (added --dataset-percent /DATASET_PERCENT) to
+  avoid repeating a tiny 1% slice for 9 epochs. Control 2301507, treatment
+  2301506, traced as 2301655/2301656: treatment moved further than control
+  on both metrics (unique_experts -0.22% vs. control's -0.11%; jaccard
+  churn -0.50% vs. control's -0.23%) -- a real, consistent, if still small,
+  directional signal for the first time.
+- Ran held-out Wikitext-2 *test*-split perplexity (scripts/router_locality_perplexity.{py,sbatch},
+  disjoint from the pilot's train slice) on baseline/control/both treatment
+  weights: baseline 7.119, control 7.049, union_weight=0.1 treatment 7.102
+  (within noise of baseline), union_weight=1.0 treatment 7.298 (+2.5%, a
+  real quality cost). 10x the weight bought no more locality (-0.22% both
+  times) but did cost real perplexity -- a sign of a capacity limit, not a
+  tuning problem.
+- Diagnosis: `enable_router_only_training` freezes the entire expert bank,
+  so it can't specialize around the router's new choices -- but SPEC's
+  method 2 description was "SFTing the router and experts" together, not
+  router-only. Added `enable_router_and_expert_training` in loss.py (also
+  unfreezes each Lfm2MoeExperts module's `gate_up_proj`/`down_proj`
+  parameters -- transformers 5.9 stores every expert as two 3D tensors, not
+  per-expert nn.Linear submodules) and a `--trainable {router,router_and_experts}`
+  flag on scripts/router_locality_pilot.py (`TRAINABLE` in the sbatch
+  wrapper). peft/LoRA is not installed in the shared cluster venv, so this
+  is full-parameter unfreezing of the expert FFNs, not a LoRA adapter --
+  watch GPU memory/optimizer-state size on the first router_and_experts run.
+  Added tests/unit/test_router_locality_trainable_scope.py.
+- Next: run a matched router_and_experts pilot (same union/churn/balance
+  weights as one of the router-only runs above) and compare locality +
+  perplexity against the router-only results at the same weight.

@@ -152,8 +152,7 @@ def locality_loss(
     }
 
 
-def enable_router_only_training(model: Any) -> list[str]:
-    """Freeze an LFM2 MoE model except for custom router weights."""
+def _router_parameter_names(model: Any) -> set[str]:
     router_parameter_names = {
         f"{module_name}.weight"
         for module_name, module in model.named_modules()
@@ -167,11 +166,52 @@ def enable_router_only_training(model: Any) -> list[str]:
         }
     if not router_parameter_names:
         raise ValueError("No LFM2 MoE router modules found on the supplied model")
+    return router_parameter_names
+
+
+def _expert_parameter_names(model: Any) -> set[str]:
+    # transformers 5.9's Lfm2MoeExperts stores every expert's weights as two
+    # 3D nn.Parameter tensors (gate_up_proj, down_proj) rather than per-expert
+    # nn.Linear submodules, so there's no per-expert ".weight" to enumerate --
+    # these two parameter names per MoE layer are the whole expert bank.
+    expert_parameter_names = {
+        f"{module_name}.{suffix}"
+        for module_name, module in model.named_modules()
+        if module.__class__.__name__ == "Lfm2MoeExperts"
+        for suffix in ("gate_up_proj", "down_proj")
+    }
+    if not expert_parameter_names:
+        raise ValueError("No LFM2MoeExperts modules found on the supplied model")
+    return expert_parameter_names
+
+
+def _enable_only(model: Any, trainable_parameter_names: set[str]) -> list[str]:
     enabled: list[str] = []
     for name, parameter in model.named_parameters():
-        parameter.requires_grad = name in router_parameter_names
+        parameter.requires_grad = name in trainable_parameter_names
         if parameter.requires_grad:
             enabled.append(name)
-    if set(enabled) != router_parameter_names:
-        raise RuntimeError(f"Could not enable all router parameters: {sorted(router_parameter_names - set(enabled))}")
+    if set(enabled) != trainable_parameter_names:
+        raise RuntimeError(
+            f"Could not enable all requested parameters: {sorted(trainable_parameter_names - set(enabled))}"
+        )
     return enabled
+
+
+def enable_router_only_training(model: Any) -> list[str]:
+    """Freeze an LFM2 MoE model except for custom router weights."""
+    return _enable_only(model, _router_parameter_names(model))
+
+
+def enable_router_and_expert_training(model: Any) -> list[str]:
+    """Freeze an LFM2 MoE model except for router weights and expert FFNs.
+
+    Router-only training (enable_router_only_training) leaves the frozen
+    expert bank unable to specialize, which empirically capped the locality
+    loss's effect: 10x the union_weight produced the same tiny locality
+    shift but a real perplexity cost. This matches the original spec
+    ("SFTing the router and experts") by also unfreezing each MoE layer's
+    expert weights, giving the router room to settle into a smaller expert
+    set without the frozen experts fighting it on quality.
+    """
+    return _enable_only(model, _router_parameter_names(model) | _expert_parameter_names(model))

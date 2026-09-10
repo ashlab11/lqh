@@ -23,6 +23,16 @@ def main() -> None:
         help="Percent of the Wikitext-2 train split to use, e.g. 20 to avoid "
         "many repeated epochs over a tiny slice at high --steps.",
     )
+    parser.add_argument(
+        "--trainable",
+        choices=["router", "router_and_experts"],
+        default="router",
+        help="'router' freezes everything but the gate weights (cheap, but "
+        "empirically capacity-limited: 10x the union_weight didn't improve "
+        "locality further, only quality cost). 'router_and_experts' also "
+        "unfreezes each MoE layer's expert FFN weights, matching the "
+        "original spec of SFTing router+experts together.",
+    )
     args = parser.parse_args()
 
     import torch
@@ -32,6 +42,7 @@ def main() -> None:
     from lqh.experiments.router_locality.loss import (
         LocalityLossConfig,
         RouterLogitCollector,
+        enable_router_and_expert_training,
         enable_router_only_training,
         locality_loss,
     )
@@ -56,7 +67,13 @@ def main() -> None:
 
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
     model.to("cuda")
-    enabled = enable_router_only_training(model)
+    enabled = (
+        enable_router_and_expert_training(model)
+        if args.trainable == "router_and_experts"
+        else enable_router_only_training(model)
+    )
+    print(f"trainable scope: {args.trainable} ({len(enabled)} tensors, "
+          f"{sum(model.get_parameter(n).numel() for n in enabled):,} params)")
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     collector = RouterLogitCollector()
@@ -93,8 +110,19 @@ def main() -> None:
             handle.remove()
     args.output.mkdir(parents=True, exist_ok=True)
     router_state = {name: value.detach().cpu() for name, value in model.state_dict().items() if name in enabled}
-    torch.save({"base_model": args.model, "router_weights": router_state, "steps": args.steps, "union_weight": args.union_weight, "churn_weight": args.churn_weight, "balance_weight": args.balance_weight}, args.output / "router_delta.pt")
-    print(f"saved {len(router_state)} router tensors to {args.output / 'router_delta.pt'}")
+    torch.save(
+        {
+            "base_model": args.model,
+            "router_weights": router_state,
+            "trainable_scope": args.trainable,
+            "steps": args.steps,
+            "union_weight": args.union_weight,
+            "churn_weight": args.churn_weight,
+            "balance_weight": args.balance_weight,
+        },
+        args.output / "router_delta.pt",
+    )
+    print(f"saved {len(router_state)} tensors ({args.trainable}) to {args.output / 'router_delta.pt'}")
 
 
 if __name__ == "__main__":
