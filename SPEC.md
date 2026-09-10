@@ -58,3 +58,32 @@ warm cache measurements remain separate.
 The baseline trace is schema-versioned, reproducible from a saved prompt suite,
 and has unit tests using a small fake MoE model. Its aggregate report makes it
 possible to rank prompts/layers by unique-expert count and routing churn.
+
+## Second milestone: shifted-router prefetch feasibility (method 3)
+
+After method 2's SFT results were logged (see
+`lqh/experiments/router_locality/RESULTS.md`), the project moved to method 3:
+moving each MoE layer's router computation one layer earlier so its output
+can prefetch experts from SSD ahead of need, without running any router
+twice.
+
+First step is observation-only, mirroring the method 2 milestone above: for
+every MoE decoder layer, compare the real (post-attention) top-k expert
+selection against what the *same, untrained* router weights would pick if
+fed that layer's own input hidden state instead (one layer early, after the
+same `ffn_norm`). No training or weight changes in this milestone.
+
+Metrics (`lqh/experiments/shifted_router/trace.py`):
+
+- per-token hit rate: fraction of the real top-k experts that the one-layer-
+  early ("shifted") guess already includes -- this is the resident-cache hit
+  rate a naive prefetch-from-the-shifted-guess policy would achieve;
+- per-token wasted rate: fraction of the shifted guess not actually needed --
+  SSD bandwidth spent prefetching experts the real routing didn't select;
+- per-sequence/layer real vs. shifted unique-expert-set sizes.
+
+If the untrained router's own weights already predict real routing well one
+layer early, an SSD-prefetch runtime may need no fine-tuning at all before a
+runtime prototype. If not, the next step is fine-tuning a shifted router
+specifically (reusing method 2's training infrastructure) before building
+the runtime.
