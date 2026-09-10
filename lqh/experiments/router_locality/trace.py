@@ -146,14 +146,18 @@ def attach_lfm2_moe_router_trace(model: Any, collector: RouterTraceCollector) ->
         def capture_router_output(
             _module: Any,
             _inputs: tuple[Any, ...],
-            output: tuple[Any, Any, Any],
+            output: Any,
             *,
             _layer: int = layer,
             _shape: dict[str, int] = shape,
+            _block: Any = block,
         ) -> None:
             if "batch_size" not in _shape or "sequence_length" not in _shape:
                 raise RuntimeError("MoE router executed before its block-shape hook")
-            _logits, _weights, selected_experts = output
+            if isinstance(output, tuple):
+                selected_experts = output[2]
+            else:
+                selected_experts, _weights = _block.route_tokens_to_experts(output)
             collector.record(
                 layer=_layer,
                 batch_size=_shape["batch_size"],

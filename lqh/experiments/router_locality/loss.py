@@ -61,7 +61,7 @@ class RouterLogitCollector:
             ) -> None:
                 if "batch_size" not in _shape or "sequence_length" not in _shape:
                     raise RuntimeError("MoE router executed before its block-shape hook")
-                logits = output[0]
+                logits = output[0] if isinstance(output, tuple) else output
                 self.layer_logits.append(
                     (_layer, logits.reshape(_shape["batch_size"], _shape["sequence_length"], -1))
                 )
@@ -129,7 +129,13 @@ def enable_router_only_training(model: Any) -> list[str]:
         if module.__class__.__name__ == "Lfm2MoeTopKRouter"
     }
     if not router_parameter_names:
-        raise ValueError("No Lfm2MoeTopKRouter modules found on the supplied model")
+        router_parameter_names = {
+            f"{module_name}.gate.weight"
+            for module_name, module in model.named_modules()
+            if module.__class__.__name__ == "Lfm2MoeSparseMoeBlock"
+        }
+    if not router_parameter_names:
+        raise ValueError("No LFM2 MoE router modules found on the supplied model")
     enabled: list[str] = []
     for name, parameter in model.named_parameters():
         parameter.requires_grad = name in router_parameter_names

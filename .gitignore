@@ -44,3 +44,7 @@ copy_to_*.sh
 # OS
 .DS_Store
 Thumbs.db
+
+# Router locality experiment artifacts
+/experiments/
+/logs/
