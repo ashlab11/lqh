@@ -33,6 +33,17 @@ def main() -> None:
         "unfreezes each MoE layer's expert FFN weights, matching the "
         "original spec of SFTing router+experts together.",
     )
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="LR for router (gate) parameters.")
+    parser.add_argument(
+        "--expert-learning-rate",
+        type=float,
+        default=1e-5,
+        help="LR for expert FFN parameters when --trainable=router_and_experts. "
+        "Full fine-tuning of pretrained experts needs a much smaller LR than "
+        "the router's -- using --learning-rate (1e-4) for both caused "
+        "catastrophic quality collapse (held-out perplexity +56%% for an "
+        "LM-loss-only control, i.e. with the locality loss's weight at 0).",
+    )
     args = parser.parse_args()
 
     import torch
@@ -74,6 +85,8 @@ def main() -> None:
     )
     print(f"trainable scope: {args.trainable} ({len(enabled)} tensors, "
           f"{sum(model.get_parameter(n).numel() for n in enabled):,} params)")
+    expert_names = {name for name in enabled if name.endswith("gate_up_proj") or name.endswith("down_proj")}
+    router_names = set(enabled) - expert_names
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     collector = RouterLogitCollector()
@@ -81,6 +94,17 @@ def main() -> None:
     locality = LocalityLossConfig(union_weight=args.union_weight, churn_weight=args.churn_weight, balance_weight=args.balance_weight)
 
     class PilotTrainer(Trainer):
+        def create_optimizer(self):
+            if self.optimizer is None:
+                named = dict(self.model.named_parameters())
+                param_groups = [{"params": [named[n] for n in router_names], "lr": args.learning_rate}]
+                if expert_names:
+                    param_groups.append(
+                        {"params": [named[n] for n in expert_names], "lr": args.expert_learning_rate}
+                    )
+                self.optimizer = torch.optim.AdamW(param_groups)
+            return self.optimizer
+
         def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             attention_mask = inputs["attention_mask"]
             collector.clear()
@@ -95,7 +119,7 @@ def main() -> None:
         max_steps=args.steps,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
-        learning_rate=1e-4,
+        learning_rate=args.learning_rate,
         bf16=True,
         logging_steps=1,
         save_strategy="no",
