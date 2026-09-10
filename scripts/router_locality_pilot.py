@@ -16,6 +16,13 @@ def main() -> None:
     parser.add_argument("--union-weight", type=float, default=0.1)
     parser.add_argument("--churn-weight", type=float, default=0.05)
     parser.add_argument("--balance-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--dataset-percent",
+        type=int,
+        default=1,
+        help="Percent of the Wikitext-2 train split to use, e.g. 20 to avoid "
+        "many repeated epochs over a tiny slice at high --steps.",
+    )
     args = parser.parse_args()
 
     import torch
@@ -32,7 +39,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    raw = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train[:1%]")
+    raw = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split=f"train[:{args.dataset_percent}%]")
     raw = raw.filter(lambda row: bool(row["text"].strip()))
 
     def tokenize(row):
