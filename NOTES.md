@@ -168,3 +168,41 @@
   eval) is now validated as numerically correct and stable. The locality
   effect achieved so far is real but small. Decision point: continue
   investing in method 2's loss design/scale, or move on to methods 1/3.
+
+## 2026-09-10 (continued): method 3 (shifted router) -- strong zero-training result
+
+- Scaffolded `lqh/experiments/shifted_router/trace.py`: observation-only,
+  no training. For every MoE decoder layer, hooks the layer's own input
+  (pre-attention) and feeds it through the *same, untrained* gate + ffn_norm
+  to get a "shifted" (one-layer-early) expert prediction, compared against
+  the real (post-attention) selection. See `SPEC.md` for the full design
+  rationale and `RESULTS.md`-equivalent writeup below.
+- Found and fixed two bugs before the first real run succeeded: (1) hook
+  re-entrancy -- calling `_block.gate(...)` inside the gate's own forward
+  hook re-triggers that same hook recursively, since PyTorch fires forward
+  hooks on every call to a hooked module including manual ones; fixed with
+  a direct `torch.nn.functional.linear` call. (2) a shape mismatch -- the
+  real path flattens hidden_states to `[B*S, H]` before its gate call, but
+  the shifted computation hadn't, giving `[B, S, top_k]` instead of
+  `[B*S, top_k]`. Both covered by regression tests using a small fake
+  model (`tests/unit/test_shifted_router_hooks.py`).
+- First real trace (2303601, same 4-prompt suite as the router-locality
+  baseline): **mean_hit_rate = 0.860, mean_wasted_rate = 0.140** across 22
+  MoE layers. Per-layer hit rate ranges 0.72-0.94 (generally higher in
+  deeper layers). For reference, a naive fixed guess with no signal at all
+  would get ~12.5% hit rate by chance (top 4 of 32 experts).
+- This means: with the current, *completely untrained* router weights,
+  feeding them the previous layer's output one step early already predicts
+  86% of the real top-k expert selections correctly, at the cost of
+  prefetching 14% extra experts that turn out unneeded. This is a strong
+  signal for method 3's core premise -- an SSD-prefetch runtime built on
+  this shifted signal, with no fine-tuning at all, should already achieve a
+  high resident-cache hit rate. Correctness is unaffected either way: real
+  routing still runs normally at inference time; the shifted signal only
+  decides what to prefetch, and a miss just costs an on-demand SSD fetch
+  rather than a wrong answer.
+- Next: (a) run on a larger/more diverse prompt suite to confirm this isn't
+  an artifact of the small 4-prompt baseline set, (b) consider whether
+  fine-tuning the router specifically for this shifted-input signal
+  improves the hit rate further, (c) start scoping the actual SSD-prefetch
+  runtime prototype now that the core premise looks validated.
