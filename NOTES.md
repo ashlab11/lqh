@@ -128,3 +128,43 @@
   full-parameter unfreezing. peft is not installed in the shared cluster
   venv; installing it or hand-rolling a low-rank adapter is now on the
   table.
+
+## 2026-09-10 (continued): expert LR fix reveals the -16% result was collapse, not specialization
+
+- Root cause of the router+experts collapse: both control and treatment
+  used the router's lr=1e-4 for the expert FFN params too. Full
+  fine-tuning of pretrained experts at that LR is itself destabilizing.
+  Added --expert-learning-rate (default 1e-5) with separate AdamW param
+  groups in PilotTrainer.create_optimizer (router_locality_pilot.py).
+- Smoke test at the lower expert LR (2302804, 100 steps/5% data) confirmed
+  quality is preserved: perplexity 7.027, matching baseline's 7.119.
+- Reran the full matched control/treatment (2302835/2302836, same
+  union=1.0/churn=0.5/balance=0.1 weights and 20%-of-train data as the
+  collapsed run) with the fixed expert LR. Traced (2303048/2303049) and
+  evaluated perplexity (2303050/2303051):
+  - control: mean_unique_experts +0.11%, perplexity 6.792 (-4.6%, i.e.
+    *better* than baseline)
+  - treatment: mean_unique_experts **-0.16%**, jaccard churn -0.33%,
+    perplexity 7.088 (-0.4%, essentially matching baseline)
+- **Conclusion: the earlier -16.37%/-17.78% locality result (2302364) was
+  almost entirely an artifact of the too-high expert LR destabilizing the
+  model into a degenerate routing pattern, not real learned
+  specialization.** With training actually stable (quality preserved),
+  the real, controlled locality effect from router+experts training is
+  back down to the same tiny magnitude (~0.1-0.5%) seen in every
+  router-only variant tried so far, across three independent
+  configurations: union_weight in {0.1, 1.0} router-only, and
+  union_weight=1.0 router+experts. This is a fairly strong signal that
+  reaching materially more locality (e.g. double-digit percent reductions
+  in touched experts) needs either much more training (steps/data), a
+  fundamentally different loss design (e.g. penalize churn between
+  *adjacent requests*, not just adjacent tokens within one sequence -- the
+  premise in SPEC.md is per-request reuse across a whole serving session,
+  which this pilot's within-sequence framing only approximates), or
+  accepting that post-hoc SFT of a model already trained with a
+  load-balancing objective has limited headroom for this without more
+  investment.
+- Status: infrastructure (trace, loss, both training scopes, perplexity
+  eval) is now validated as numerically correct and stable. The locality
+  effect achieved so far is real but small. Decision point: continue
+  investing in method 2's loss design/scale, or move on to methods 1/3.
