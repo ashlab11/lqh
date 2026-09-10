@@ -44,7 +44,23 @@
   softmax are both monotonic in logits, this shares the real mechanism's
   rank order and is correctly calibrated to sum to top_k per token. Added
   tests/unit/test_router_locality_loss.py::test_union_loss_proxy_is_calibrated_to_top_k_not_one.
-- Next: rerun the matched pilot (same seed/data/steps) with this second fix
+- Reran the matched 2000-step pilot with the calibration fix (2300759): went
+  to NaN loss within ~15 steps. Cancelled the job (`scancel`) rather than
+  let it burn GPU time to completion.
+- Root cause #3: float32's own precision near 1.0 (~1.19e-7 ULP) is coarser
+  than the old `epsilon=1e-8`, so `clamp(max=1-epsilon)` was a silent no-op
+  whenever a probability saturated to exactly 1.0 (confirmed directly:
+  `torch.tensor(1.0).clamp(max=1-1e-8) == 1.0` in float32). `log1p(-1.0)`'s
+  *derivative* is `-inf` (not just the forward value), so real, confidently
+  routed logits blew up the backward pass into NaN within ~15 steps.
+  Bumped `LocalityLossConfig.epsilon` to 1e-4 (comfortably above float32
+  precision; also upcast to float32 before the log1p, since bf16's own ULP
+  near 1.0, ~0.0078, is coarser still) and confirmed the clamp now yields a
+  clean *zero* gradient past the boundary instead of `-inf`. Added
+  tests/unit/test_router_locality_loss.py::test_union_loss_gradient_is_finite_at_probability_saturation
+  and ::test_union_loss_does_not_nan_on_bf16_padding (masking before log1p,
+  not after, is still correct defensive practice even though it wasn't the
+  actual trigger here since the pilot's batch_size=1 runs have no padding).
+- Next: rerun the matched pilot (same seed/data/steps) with this third fix
   before drawing any conclusion about whether the locality loss works; all
-  prior pilot results (200 and 2000 step, at 1x and 20x weight) used the
-  miscalibrated proxy and are not informative about the corrected loss.
+  prior pilot results used a buggy loss and are not informative.

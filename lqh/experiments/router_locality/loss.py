@@ -17,7 +17,13 @@ class LocalityLossConfig:
     churn_weight: float = 0.0
     balance_weight: float = 0.0
     top_k: int = 4
-    epsilon: float = 1e-8
+    # float32's own precision near 1.0 (~1.19e-7 ULP) is coarser than 1e-8, so
+    # a smaller epsilon here is a silent no-op: clamp(max=1-epsilon) leaves a
+    # saturated probability at exactly 1.0, and log1p(-1.0)'s derivative is
+    # -inf, not just large -- this caused a real training run to hit NaN
+    # gradients within ~15 steps. 1e-4 keeps the clamp boundary comfortably
+    # above float32 precision so it's never a no-op.
+    epsilon: float = 1e-4
 
 
 def _layer_index(module_name: str) -> int:
@@ -111,8 +117,16 @@ def locality_loss(
         # dividing by the expert count yields a [0, 1] proxy for the fraction of
         # the layer's experts a sequence touches -- directly comparable to the
         # trace's unique-expert metric, and not diluted by sequence length.
-        log_miss = torch.log1p(-probabilities.clamp(max=1 - config.epsilon))
-        log_miss = log_miss * valid.unsqueeze(-1)
+        #
+        # Do the log1p in float32 and zero out padded positions BEFORE it, not
+        # after: bf16 can't represent config.epsilon (1e-8) as distinct from
+        # 0, so a saturated probability clamped to "1 - epsilon" rounds back
+        # to exactly 1.0 in bf16, making log1p(-1.0) = -inf. Masking with a
+        # multiply after that computes -inf * 0 = NaN for every padded
+        # position, poisoning the whole batch from step one.
+        probabilities_f32 = probabilities.to(torch.float32).clamp(max=1 - config.epsilon)
+        masked_f32 = probabilities_f32 * valid.unsqueeze(-1)
+        log_miss = torch.log1p(-masked_f32)
         expected_union_per_expert = 1 - torch.exp(log_miss.sum(dim=1))
         union_terms.append(expected_union_per_expert.sum(dim=-1).div(logits.shape[-1]).mean())
         if probabilities.shape[1] > 1:

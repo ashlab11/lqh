@@ -50,6 +50,49 @@ def test_union_loss_is_not_shrunk_by_appending_redundant_valid_tokens() -> None:
     assert extended_metrics["router_expected_union"].item() >= base_metrics["router_expected_union"].item() - 1e-4
 
 
+def test_union_loss_does_not_nan_on_bf16_padding() -> None:
+    """Regression test: bf16 can't represent config.epsilon (1e-8) as distinct
+    from 0, so a confidently-selected probability clamped to "1 - epsilon"
+    rounds back to exactly 1.0 in bf16, making log1p(-1.0) = -inf. A prior
+    version zeroed out padded positions by multiplying that log-space value
+    by the attention mask, computing -inf * 0 = NaN for every padded
+    position and poisoning the entire loss from the first training step
+    (confirmed empirically: a real 2000-step pilot went to NaN loss within
+    ~15 steps). Padding must be applied to the probability before log1p, not
+    to the log-space result after."""
+    config = LocalityLossConfig(union_weight=1.0, top_k=4)
+    num_experts = 32
+    logits = torch.zeros(1, 2, num_experts, dtype=torch.bfloat16)
+    logits[:, :, :4] = 15.0  # confident selection, saturates softmax near 1.0 in bf16
+    mask = torch.tensor([[1, 0]], dtype=torch.long)  # second token is padding
+
+    _, metrics = locality_loss([(0, logits)], mask, config)
+
+    assert not torch.isnan(metrics["router_expected_union"])
+    assert not torch.isinf(metrics["router_expected_union"])
+
+
+def test_union_loss_gradient_is_finite_at_probability_saturation() -> None:
+    """Regression test: float32's own precision near 1.0 (~1.19e-7 ULP) is
+    coarser than the old epsilon (1e-8), so clamp(max=1-epsilon) was a silent
+    no-op whenever a probability saturated to exactly 1.0 -- log1p(-1.0)'s
+    derivative is -inf, not just large. A real 2000-step cluster run hit NaN
+    gradients within ~15 steps from this. Confident real router logits
+    routinely saturate softmax this close to 1.0, so this must stay finite
+    (zero gradient past the clamp boundary is fine; -inf/NaN is not)."""
+    config = LocalityLossConfig(union_weight=1.0, top_k=4)
+    num_experts = 32
+    logits = torch.zeros(1, 4, num_experts, requires_grad=True)
+    with torch.no_grad():
+        logits[:, :, :4] = 30.0  # saturates softmax to exactly 1.0 in float32
+    mask = torch.ones(1, 4, dtype=torch.long)
+
+    total, _ = locality_loss([(0, logits)], mask, config)
+    total.backward()
+
+    assert torch.isfinite(logits.grad).all()
+
+
 def test_union_loss_proxy_is_calibrated_to_top_k_not_one() -> None:
     """Regression test: LFM2's real selection
     (Lfm2MoeSparseMoeBlock.route_tokens_to_experts) picks the top_k experts by
