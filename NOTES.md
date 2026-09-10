@@ -206,3 +206,50 @@
   fine-tuning the router specifically for this shifted-input signal
   improves the hit rate further, (c) start scoping the actual SSD-prefetch
   runtime prototype now that the core premise looks validated.
+
+## 2026-09-10 (continued): method 3 -- small SFT of the shifted gate
+
+Per the user's explicit ask ("try some small SFT on the router specifically
+for method 3"), implemented pure self-distillation of a small duplicate gate
+rather than rewiring the model's real forward pass:
+
+- `lqh/experiments/shifted_router/model.py::add_shifted_gates`: adds a
+  `shifted_gate` nn.Linear (copy-initialized from the real, frozen `gate`)
+  to every MoE block; freezes every other parameter including the real gate
+  and all experts, so the base model's real forward pass and output quality
+  are unaffected by this training regardless of outcome.
+- `lqh/experiments/shifted_router/distill.py`: BCE distillation loss between
+  shifted_gate's sigmoid scores (fed the one-layer-early hidden state) and
+  the real gate's own sigmoid scores for the *same* forward pass (detached
+  -- a stable target since the real gate never moves). No labels, no LM
+  loss: pure self-distillation on unlabeled Wikitext-2 text.
+- Found and fixed two bugs in the observational trace before this worked:
+  hook re-entrancy (calling `_block.gate(...)` inside the gate's own forward
+  hook re-triggers that hook recursively) and a shape mismatch (the real
+  path flattens hidden_states before its gate call; the shifted computation
+  hadn't). Both covered by regression tests using a fake model
+  (`tests/unit/test_shifted_router_hooks.py`,
+  `tests/unit/test_shifted_router_distill.py`).
+
+Results (same 4-prompt trace suite as the zero-shot baseline):
+
+| run | steps | data | mean_hit_rate | mean_wasted_rate |
+|---|---|---|---|---|
+| zero-shot (untrained gate, fed early input) | 0 | — | 0.860 | 0.140 |
+| smoke test | 20 | 1% | 0.874 | 0.126 |
+| pilot | 2000 | 20% | **0.884** | **0.116** |
+
+Consistent improvement with more training (loss plateaued around 0.24-0.30
+BCE fairly quickly -- may indicate the linear shifted_gate is near its
+natural ceiling for this task, or that a higher LR/more steps/capacity would
+help further; not yet tested). Per-layer breakdown after training: most
+layers improved (e.g. layer 17: 0.931->0.948, layer 9: 0.868->0.929), one
+regressed (layer 6: 0.717->0.678) -- net positive.
+
+Training cost: 2000 steps took 149.8s on one MI325 GPU; the trained delta
+is only 22 small linear layers (~1.8M params total, a few MB), a stark
+contrast to method 2's expert deltas (15GB).
+
+Next: try a higher learning rate and/or more steps/data to see where the
+ceiling actually is, and consider whether the layer-6 regression indicates
+a per-layer learning-rate or architecture issue worth investigating.
