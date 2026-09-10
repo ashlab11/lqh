@@ -82,7 +82,6 @@ def locality_loss(
     import torch
 
     valid = attention_mask.to(dtype=torch.bool)
-    valid_counts = valid.sum(dim=1).clamp_min(1).to(dtype=torch.float32)
     union_terms: list[Any] = []
     churn_terms: list[Any] = []
     balance_terms: list[Any] = []
@@ -95,9 +94,21 @@ def locality_loss(
         scores = torch.sigmoid(logits)
         probabilities = scores / scores.sum(dim=-1, keepdim=True).clamp_min(config.epsilon)
         masked_probabilities = probabilities * valid.unsqueeze(-1)
-        draws = valid_counts[:, None, None] * config.top_k
-        expected_union = 1 - torch.pow((1 - probabilities).clamp_min(config.epsilon), draws)
-        union_terms.append(expected_union.sum(dim=-1).div(valid_counts).mean())
+        # Per-sequence expected fraction of experts touched at this layer: for each
+        # expert e, treat every valid token's top_k draws as independent Bernoulli
+        # trials with per-token hit probability probabilities[..., e], and compute
+        # P(expert e selected at least once anywhere in the sequence) in log-space
+        # for numerical stability. Summing over experts and dividing by the expert
+        # count yields a [0, 1] proxy for the fraction of the layer's experts a
+        # sequence touches -- directly comparable to the trace's unique-expert
+        # metric, and NOT diluted by sequence length (a prior version divided the
+        # per-sequence union estimate by valid-token count, which shrank this
+        # loss's gradient by ~seq_length relative to the language-model loss and
+        # made union_weight effectively inert).
+        log_miss = torch.log1p(-probabilities.clamp(max=1 - config.epsilon)) * config.top_k
+        log_miss = log_miss * valid.unsqueeze(-1)
+        expected_union_per_expert = 1 - torch.exp(log_miss.sum(dim=1))
+        union_terms.append(expected_union_per_expert.sum(dim=-1).div(logits.shape[-1]).mean())
         if probabilities.shape[1] > 1:
             adjacent_valid = (valid[:, 1:] & valid[:, :-1]).unsqueeze(-1)
             adjacent_delta = (probabilities[:, 1:] - probabilities[:, :-1]).abs()
