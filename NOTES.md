@@ -351,3 +351,35 @@ the same data, and comparison against a naive static-mask baseline (always
 keep the same channels regardless of instruction) to isolate how much of
 the improvement is from the *dynamic, per-instruction* selection specifically
 vs. just having a smaller/differently-initialized effective model.
+
+## 2026-09-11 (continued): held-out eval reveals frozen-target capacity ceiling
+
+Built scripts/mlp_pruning_eval.py: held-out Alpaca (train[90%:95%], disjoint
+from pilots' train[:20%]) mean per-token response CE under four conditions.
+10-example smoke test (2313981) using the 1000-step predictor_only delta:
+
+| condition | mean_nll | perplexity |
+|---|---|---|
+| dense (unpruned) | 2.07 | 8.0 |
+| zero_shot (untrained predictor) | 14.01 | 1,214,884 |
+| trained_dynamic (trained predictor, per-example mask) | 10.58 | 39,263 |
+| trained_static (trained predictor, ONE mask for all examples) | 10.54 | 37,810 |
+
+Two findings:
+1. 1000 steps of predictor-only training took perplexity from ~1.2M down to
+   ~38-39k -- real, substantial progress -- but still catastrophically far
+   from the dense model's 8.0. The frozen target model was never trained to
+   tolerate losing 75% of its FFN width; no amount of mask-selection skill
+   in the predictor can fully compensate for that (same capacity-ceiling
+   pattern as method 2's router-only training).
+2. **trained_dynamic and trained_static are nearly identical** (39,263 vs.
+   37,810 perplexity) -- the per-instruction conditioning isn't adding
+   meaningful value yet at this training budget; a single fixed mask does
+   about as well as the "dynamic" one. This may resolve once the target
+   model itself is trained to expect masking (next step), or may need more
+   predictor training steps regardless.
+
+Next: run --trainable=predictor_and_ffn (jointly fine-tune the target's FFN
+weights too, matching the paper's actual method) with a conservative
+--ffn-learning-rate, to see whether allowing the base model to adapt closes
+the gap to dense quality.
