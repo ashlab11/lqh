@@ -271,3 +271,65 @@ This is the project's first end-to-end quality measurement for method 3
 (prior numbers were all hit-rate/wasted-rate proxies). A real SSD-prefetch
 runtime with retrieval-on-miss should do better than either number here;
 these are a worst-case lower bound.
+
+## 2026-09-11: method 1 (Apple IFPruning) scaffolding
+
+Per the user's request to test Apple's Instruction-Following Pruning (Hou et
+al. 2025, arxiv.org/abs/2501.02086) on a dense model, pruning the MLP
+intermediate dim to 1/4. Read the full paper (fetched via WebFetch) for
+architecture/training details rather than guessing at the method.
+
+Target model: LiquidAI/LFM2.5-2.6B (confirmed dense via its safetensors
+index -- FFN is 73.5% of its 2.7B params, intermediate_size=10752, 30
+layers all with an FFN block regardless of conv/attention layer type).
+Predictor backbone: LiquidAI/LFM2.5-230M-Base.
+
+Implemented (lqh/experiments/mlp_pruning/):
+- soft_topk.py: differentiable top-k mask (paper eq. 3), lambda = keep_count
+  * softmax(scores) -- same relaxed-top-k construction validated for method
+  3's union-loss fix.
+- model.py: monkeypatches every Lfm2MLP to mask its SwiGLU intermediate
+  activation by a per-example, per-layer mask (decided once per instruction,
+  held for the whole sequence -- unlike MoE's per-token routing).
+- predictor.py: small LM backbone + 2-layer MLP head, pools each sequence's
+  own last real token (not last padded position) per the paper's Sec 3.2.
+- scripts/mlp_pruning_pilot.py: first pilot trains --trainable=predictor_only
+  (target model frozen entirely) as the safer starting point before also
+  fine-tuning the target's FFN weights (--trainable=predictor_and_ffn, which
+  is what the paper does, at a separate low LR per this repo's method-2
+  experience with full-parameter-fine-tuning instability).
+
+Three real-cluster bugs found and fixed before a training run succeeded
+(all confirmed via a staged bisection script, scripts/mlp_pruning_debug.py,
+since the crash carried no Python traceback even with
+CUDA_LAUNCH_BLOCKING=1/TORCH_USE_HIP_DSA=1 -- it's a genuine hardware
+exception from an unchecked GPU memory access, not a catchable error):
+1. Predictor's head (nn.Linear, defaults to fp32) fed bf16 backbone hidden
+   states, and the resulting fp32 mask multiplied bf16 FFN activations --
+   fixed by matching dtypes at both boundaries.
+2. **Root cause of the actual crash**: the pilot tokenized the instruction
+   with the *target* model's tokenizer (128000-token vocab) and fed those
+   token ids to the *predictor* backbone (65536-token vocab) -- an
+   out-of-bounds embedding-table lookup. GPUs don't bounds-check embedding
+   lookups for performance, so this surfaced as an HSA hardware exception
+   with zero Python traceback rather than a clean IndexError. Fixed by
+   loading and using the predictor backbone's own tokenizer for everything
+   that feeds it.
+3. The pilot's logged `grad_norm: 0` on every step looked alarming but is a
+   Trainer artifact: HF Trainer's grad-norm clipping operates on
+   `self.model.parameters()` (the frozen target model), never touching the
+   predictor's separate optimizer group since the predictor isn't a
+   submodule of `self.model`. Verified directly (stage 9 of the debug
+   script): a real backward pass gives predictor.head[0].weight.grad norm
+   14.625 and nonzero gradients throughout predictor.backbone -- the
+   learning signal is real, the logged metric is just measuring the wrong
+   object.
+
+All fixes covered by unit tests using small fake models (no GPU needed) plus
+the staged bisection script for the parts that need the real checkpoints.
+20-step/1%-data smoke test completed cleanly post-fixes (loss ~12-13.5,
+close to log(128000)~11.76 -- expected for a 25%-pruned model with an
+undertrained, essentially-random predictor this early).
+
+Next: run a substantial pilot (more steps/data) with a held-out eval, then
+decide whether to also unfreeze the target's FFN weights.
