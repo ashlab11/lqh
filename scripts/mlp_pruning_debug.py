@@ -111,6 +111,23 @@ def main() -> None:
     checkpoint(f"stage 8 OK, logits shape {tuple(out8.logits.shape)}")
     revert_mlp_patch(patched)
 
+    checkpoint("stage 9: confirm the predictor actually receives gradients from the LM loss")
+    patched = patch_mlp_with_mask(model, ctx)
+    labels = encoded["input_ids"].clone()
+    ctx.mask = predictor.predict_mask(predictor_encoded["input_ids"], predictor_encoded["attention_mask"], keep_count)
+    outputs = model(input_ids=encoded["input_ids"], attention_mask=encoded["attention_mask"], labels=labels)
+    outputs.loss.backward()
+    ctx.mask = None
+    revert_mlp_patch(patched)
+
+    head_first_layer = predictor.head[0]
+    grad_norm = head_first_layer.weight.grad.norm().item() if head_first_layer.weight.grad is not None else None
+    checkpoint(f"stage 9: predictor.head[0].weight.grad norm = {grad_norm}")
+    backbone_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in predictor.backbone.parameters())
+    checkpoint(f"stage 9: any predictor.backbone parameter has nonzero grad = {backbone_has_grad}")
+    if grad_norm is None or grad_norm == 0:
+        raise RuntimeError("predictor received NO gradient from the LM loss -- graph is disconnected somewhere")
+
     checkpoint("ALL STAGES PASSED")
 
 
