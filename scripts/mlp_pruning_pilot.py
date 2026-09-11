@@ -59,6 +59,16 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
+    # The predictor backbone is a *different* model (LFM2.5-230M-Base has a
+    # 65536-token vocab vs. the target's 128000), so its input must be
+    # tokenized with its own tokenizer -- feeding it target-model token ids
+    # crashed a real cluster run as an out-of-bounds embedding lookup (an
+    # unchecked GPU memory access, not a catchable Python exception).
+    predictor_tokenizer = AutoTokenizer.from_pretrained(args.predictor_backbone)
+    if predictor_tokenizer.pad_token is None:
+        predictor_tokenizer.pad_token = predictor_tokenizer.eos_token
+    predictor_tokenizer.padding_side = "right"
+
     raw = load_dataset("tatsu-lab/alpaca", split=f"train[:{args.dataset_percent}%]")
 
     def build_prompt(row: dict) -> str:
@@ -69,7 +79,7 @@ def main() -> None:
     def tokenize(row: dict) -> dict:
         prompt = build_prompt(row)
         full_text = prompt + row["output"] + tokenizer.eos_token
-        prompt_ids = tokenizer(prompt, truncation=True, max_length=args.prompt_length)["input_ids"]
+        prompt_ids = predictor_tokenizer(prompt, truncation=True, max_length=args.prompt_length)["input_ids"]
         full = tokenizer(full_text, truncation=True, max_length=args.seq_length)
         labels = list(full["input_ids"])
         prompt_len = min(len(prompt_ids), len(labels))
@@ -90,7 +100,7 @@ def main() -> None:
         for i, row in enumerate(rows):
             labels[i, : len(row["labels"])] = torch.tensor(row["labels"])
         full_batch["labels"] = labels
-        prompt_batch = tokenizer.pad([{"input_ids": r["prompt_ids"]} for r in rows], return_tensors="pt")
+        prompt_batch = predictor_tokenizer.pad([{"input_ids": r["prompt_ids"]} for r in rows], return_tensors="pt")
         full_batch["prompt_input_ids"] = prompt_batch["input_ids"]
         full_batch["prompt_attention_mask"] = prompt_batch["attention_mask"]
         return full_batch
