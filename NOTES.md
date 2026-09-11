@@ -333,3 +333,21 @@ undertrained, essentially-random predictor this early).
 
 Next: run a substantial pilot (more steps/data) with a held-out eval, then
 decide whether to also unfreeze the target's FFN weights.
+
+## 2026-09-11 (continued): method 1 first real learning signal
+
+Ran a 1000-step pilot (2306530, predictor_only, 20% of Alpaca ~10400
+examples, 25% FFN keep ratio) after the three bugs above were fixed.
+Completed cleanly in 97s. Loss dropped from ~12-13.5 at the start to
+~9.4-11 by the end (mean of last ~20 steps ~10.2) -- meaningfully below
+log(128000)~11.76 (the random-guess floor for this vocab), confirming the
+predictor is learning real, useful masks rather than staying at a
+random/degenerate solution. Trainer's own `grad_norm: 0` log line is
+confirmed cosmetic (see prior entry) and can be ignored for this setup.
+
+Not yet done: held-out eval (this run only reports training loss, not
+generalization), comparison against a no-pruning dense baseline's loss on
+the same data, and comparison against a naive static-mask baseline (always
+keep the same channels regardless of instruction) to isolate how much of
+the improvement is from the *dynamic, per-instruction* selection specifically
+vs. just having a smaller/differently-initialized effective model.
