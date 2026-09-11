@@ -51,6 +51,24 @@ def test_predict_scores_uses_last_real_token_not_last_padded_position() -> None:
     assert torch.allclose(scores[0], expected_row0_scores, atol=1e-5)
 
 
+def test_head_dtype_matches_bf16_backbone() -> None:
+    """Regression test: nn.Linear defaults to fp32, so a bf16 backbone (the
+    normal case -- models are loaded with dtype=torch.bfloat16) feeding a
+    fp32 head crashed a real cluster run as a low-level ROCm hardware
+    exception rather than a clean Python dtype error. The head must match
+    the backbone's own parameter dtype."""
+    backbone = FakeBackbone(hidden_size=16, vocab_size=50).to(torch.bfloat16)
+    predictor = SparsityPredictor(backbone, num_ffn_layers=2, ffn_dim=8)
+
+    for parameter in predictor.head.parameters():
+        assert parameter.dtype == torch.bfloat16
+
+    input_ids = torch.tensor([[5, 7, 9]])
+    attention_mask = torch.ones(1, 3, dtype=torch.long)
+    scores = predictor.predict_scores(input_ids, attention_mask)
+    assert scores.dtype == torch.bfloat16
+
+
 def test_predict_mask_has_correct_shape_and_sparsity() -> None:
     torch.manual_seed(0)
     backbone = FakeBackbone(hidden_size=16, vocab_size=50)

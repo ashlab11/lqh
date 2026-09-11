@@ -47,7 +47,13 @@ def patch_mlp_with_mask(model: Any, mask_context: PruningMaskContext) -> list[tu
         def masked_forward(self: Any, x: Any, *, _layer_idx: int = layer_idx, _ctx: PruningMaskContext = mask_context) -> Any:
             gate = F.silu(self.w1(x)) * self.w3(x)
             if _ctx.mask is not None:
-                gate = gate * _ctx.mask[:, _layer_idx, :].unsqueeze(1)
+                # Cast explicitly: the mask is produced by softmax/topk (often
+                # fp32) while gate is the model's own activation dtype
+                # (bf16). Relying on implicit type promotion here fed a
+                # dtype-mismatched tensor into w2's bf16 matmul and crashed
+                # with a low-level ROCm hardware exception rather than a
+                # clean Python error on a real cluster run.
+                gate = gate * _ctx.mask[:, _layer_idx, :].unsqueeze(1).to(gate.dtype)
             return self.w2(gate)
 
         patched.append((module, module.forward))

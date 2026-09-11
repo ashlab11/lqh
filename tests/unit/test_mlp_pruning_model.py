@@ -102,6 +102,28 @@ def test_mask_differs_per_batch_example() -> None:
     assert not torch.equal(output[0], output[1])
 
 
+def test_mask_dtype_mismatch_is_cast_not_left_to_implicit_promotion() -> None:
+    """Regression test: a mask produced by softmax/topk in one dtype (e.g.
+    fp32) multiplied against bf16 activations crashed a real cluster run as
+    a low-level ROCm hardware exception before reaching self.w2's matmul.
+    A model in bf16 fed a fp32 mask must still run cleanly."""
+    torch.manual_seed(0)
+    model = FakeModel(num_layers=1).to(torch.bfloat16)
+    inputs = torch.randn(1, 3, 6, dtype=torch.bfloat16)
+
+    ctx = PruningMaskContext()
+    patched = patch_mlp_with_mask(model, ctx)
+    try:
+        ctx.mask = torch.ones(1, 1, 8, dtype=torch.float32)  # deliberately mismatched dtype
+        with torch.no_grad():
+            output = model(inputs)
+    finally:
+        revert_mlp_patch(patched)
+
+    assert output.dtype == torch.bfloat16
+    assert torch.isfinite(output.float()).all()
+
+
 def test_revert_restores_original_forward() -> None:
     torch.manual_seed(0)
     model = FakeModel(num_layers=1)

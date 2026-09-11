@@ -26,11 +26,17 @@ class SparsityPredictor:
         self.num_ffn_layers = num_ffn_layers
         self.ffn_dim = ffn_dim
         backbone_hidden_size = backbone.config.hidden_size
+        # nn.Linear defaults to fp32; the backbone is typically loaded in
+        # bf16, so without matching dtypes here the head's first matmul sees
+        # a bf16 input against fp32 weights -- a mismatch that can crash as
+        # a low-level ROCm hardware exception rather than a clean Python
+        # error (confirmed on a real cluster run).
+        head_dtype = next(backbone.parameters()).dtype
         self.head = nn.Sequential(
             nn.Linear(backbone_hidden_size, mlp_hidden_dim),
             nn.GELU(),
             nn.Linear(mlp_hidden_dim, num_ffn_layers * ffn_dim),
-        )
+        ).to(head_dtype)
 
     def to(self, *args: Any, **kwargs: Any) -> "SparsityPredictor":
         self.backbone = self.backbone.to(*args, **kwargs)
