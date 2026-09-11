@@ -383,3 +383,40 @@ Next: run --trainable=predictor_and_ffn (jointly fine-tune the target's FFN
 weights too, matching the paper's actual method) with a conservative
 --ffn-learning-rate, to see whether allowing the base model to adapt closes
 the gap to dense quality.
+
+## 2026-09-11 (continued): predictor_and_ffn -- 200 steps, inconclusive/negative so far
+
+Ran --trainable=predictor_and_ffn (200 steps, 5% Alpaca, ffn-lr=1e-5) as a
+first test of jointly fine-tuning the target's FFN weights (matching the
+paper's actual method, vs. the frozen-target predictor_only mode above).
+Training grad_norm was large and noisy toward the end (600-1550, vs.
+predictor_only's clean near-zero-on-target-model reading), and loss trended
+slightly back up in the final ~50 steps -- reminiscent of method 2's early
+full-parameter-fine-tuning instability, though this run did not NaN.
+
+Held-out eval (2314051, 10 examples) at 200 steps:
+
+| condition | mean_nll | perplexity |
+|---|---|---|
+| dense (FFN-tuned model, unpruned) | 2.06 | 7.8 |
+| zero_shot | 13.79 | 977,000 |
+| trained_dynamic | 12.93 | 411,000 |
+| trained_static | 12.98 | 432,000 |
+
+Two things stand out:
+1. The FFN-tuned model's *unpruned* quality is essentially unchanged from
+   the original dense baseline (2.06 vs. 2.07 nll) -- 200 steps at this LR
+   hasn't damaged full-width behavior.
+2. But *pruned* quality (trained_dynamic/static) is currently WORSE than
+   predictor_only's 1000-step result (12.93-12.98 vs. 10.54-10.58 nll) --
+   not a fair comparison yet given 200 vs. 1000 steps and the visible
+   training noise/instability signs, but no evidence yet that unfreezing
+   the FFN is the fix predictor_only's capacity ceiling needs. Needs a
+   longer, more stable predictor_and_ffn run (more steps and/or a lower
+   ffn-learning-rate) before concluding either way.
+
+Status: paused here pending direction -- both modes are still far from
+dense quality at 25% FFN width; method 1 needs meaningfully more training
+budget (and possibly the paper's full two-stage continued-pretrain-then-SFT
+recipe, which this session has only approximated with a single SFT-only
+stage) before it's a fair test of the actual technique's ceiling.
