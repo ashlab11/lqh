@@ -253,3 +253,21 @@ contrast to method 2's expert deltas (15GB).
 Next: try a higher learning rate and/or more steps/data to see where the
 ceiling actually is, and consider whether the layer-6 regression indicates
 a per-layer learning-rate or architecture issue worth investigating.
+
+## 2026-09-11: method 3 hard-commit quality cost (per user request)
+
+Added `lqh/experiments/shifted_router/hard_routing.py` (monkeypatches real
+expert computation to use the one-layer-early routing decision, zero
+retrieval for misses -- eval-only, reverts cleanly) and
+`scripts/shifted_router_perplexity.py` to measure actual end-to-end quality
+under this "worst case, no fallback" prefetch scenario. Full results in
+`lqh/experiments/shifted_router/RESULTS.md`:
+
+- zero-shot hard-shifted: perplexity 7.615 (+7.0% vs. baseline 7.119)
+- small-SFT hard-shifted (the 2000-step distilled shifted_gate from
+  yesterday): perplexity 7.331 (+3.0%) -- SFT closes 57% of the gap.
+
+This is the project's first end-to-end quality measurement for method 3
+(prior numbers were all hit-rate/wasted-rate proxies). A real SSD-prefetch
+runtime with retrieval-on-miss should do better than either number here;
+these are a worst-case lower bound.
